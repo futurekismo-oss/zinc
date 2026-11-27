@@ -1,35 +1,88 @@
-name: Create release
+name: Create binary release
 
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    env:
-      RELEASE_NAME: zinc-${{ github.ref_name }}
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Build release archive
+      - name: Install system dependencies
         run: |
-          mkdir -p ".release/$RELEASE_NAME"
-          rsync -av --exclude={'.*','zig-cache','zig-out','references','scratch'} . ".release/$RELEASE_NAME"
-          tar -C .release -czf "$RELEASE_NAME.tar.gz" "$RELEASE_NAME"
-          cp "$RELEASE_NAME.tar.gz" zinc-latest.tar.gz
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libfreetype-dev \
+            libfontconfig1-dev
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Build release prefix
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          CLEAN_VERSION="${VERSION#v}"
+          zig build install \
+            --prefix "dist/zinc-${{ github.ref_name }}-linux-${{ matrix.arch }}" \
+            -Doptimize=ReleaseSafe \
+            -Dversion="$CLEAN_VERSION"
+
+      - name: Package release archive
+        env:
+          ARCHIVE_NAME: zinc-${{ github.ref_name }}-linux-${{ matrix.arch }}
+        run: |
+          cp README.md LICENSE "dist/$ARCHIVE_NAME/" 2>/dev/null || true
+          tar -C dist -czf "$ARCHIVE_NAME.tar.gz" "$ARCHIVE_NAME"
+          cp "$ARCHIVE_NAME.tar.gz" "zinc-latest-linux-${{ matrix.arch }}.tar.gz"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: |
+            zinc-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz
+            zinc-latest-linux-${{ matrix.arch }}.tar.gz
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum *.tar.gz > checksums.txt
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ${{ env.RELEASE_NAME }}.tar.gz
-            zinc-latest.tar.gz
+          files: artifacts/*
           generate_release_notes: true
